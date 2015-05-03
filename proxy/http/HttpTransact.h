@@ -356,6 +356,13 @@ public:
     HTTP_TRANSACT_MAGIC_SEPARATOR = 0x12345678
   };
 
+  enum ParentOriginRetry_t 
+  {
+    UNDEFINED_RETRY,
+    SIMPLE_RETRY,
+    DEAD_SERVER_RETRY
+  };
+
   enum LookingUp_t
   {
     ORIGIN_SERVER,
@@ -748,10 +755,14 @@ public:
     ink_time_t now;
     ServerState_t state;
     int attempts;
+    int simple_retry_attempts;
+    int dead_server_retry_attempts;
+    ParentOriginRetry_t retry_type;
 
     _CurrentInfo()
       : mode(UNDEFINED_MODE),
-        request_to(UNDEFINED_LOOKUP), server(NULL), now(0), state(STATE_UNDEFINED), attempts(1)
+        request_to(UNDEFINED_LOOKUP), server(NULL), now(0), state(STATE_UNDEFINED), attempts(1), 
+        simple_retry_attempts (0), dead_server_retry_attempts(0), retry_type(UNDEFINED_RETRY)
     { };
   } CurrentInfo;
 
@@ -862,8 +873,9 @@ public:
     CacheLookupInfo cache_info;
     bool force_dns;
     DNSLookupInfo dns_info;
-    RedirectInfo redirect_info;
+    RedirectInfo redirect_info; 
     unsigned int updated_server_version;
+    bool hack_force_fresh;
     bool is_revalidation_necessary;     //Added to check if revalidation is necessary - YTS Team, yamsat
     bool request_will_not_selfloop;     // To determine if process done - YTS Team, yamsat
     ConnectionAttributes client_info;
@@ -1029,7 +1041,9 @@ public:
     // Constructor
     State()
       : m_magic(HTTP_TRANSACT_MAGIC_ALIVE), state_machine(NULL), http_config_param(NULL), force_dns(false),
-        updated_server_version(HostDBApplicationInfo::HTTP_VERSION_UNDEFINED), is_revalidation_necessary(false),
+        updated_server_version(HostDBApplicationInfo::HTTP_VERSION_UNDEFINED), 
+        hack_force_fresh(false),
+        is_revalidation_necessary(false),
         request_will_not_selfloop(false),       //YTS Team, yamsat
         source(SOURCE_NONE),
         pre_transform_source(SOURCE_NONE),
