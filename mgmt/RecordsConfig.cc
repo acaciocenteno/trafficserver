@@ -470,6 +470,20 @@ static const RecordElement RecordsConfig[] =
   {RECT_CONFIG, "proxy.config.http.auth_server_session_private", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
   ,
 
+  //        ###################################
+  //        # parent origin configuration     #
+  //        ###################################
+  {RECT_CONFIG, "proxy.config.http.parent_origin.simple_retry_enabled", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_NULL, NULL, RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.parent_origin.simple_retry_attempts_max_retries", RECD_INT, "2", RECU_DYNAMIC, RR_NULL, RECC_NULL, NULL, RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.parent_origin.simple_retry_response_codes", RECD_STRING, "404", RECU_DYNAMIC, RR_NULL, RECC_STR, "^([0-9]+,)$", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.parent_origin.dead_server_retry_enabled", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_NULL, NULL, RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.parent_origin.dead_server_retry_response_codes", RECD_STRING, "503", RECU_DYNAMIC, RR_NULL, RECC_STR, "^([0-9]+,)$", RECA_NULL}
+  ,
+
   //        ##############################
   //        # parent proxy configuration #
   //        ##############################

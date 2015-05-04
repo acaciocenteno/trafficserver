@@ -274,8 +274,15 @@ find_server_and_update_current_info(HttpTransact::State* s)
     switch (s->parent_result.r) {
     case PARENT_UNDEFINED:
       s->parent_params->findParent(&s->request_data, &s->parent_result);
+      if (s->parent_result.rec != NULL) {
+        // check to see if the parent is an origin server.
+        if (! s->parent_result.rec->isParentProxy()) {
+         s->parent_result.r = PARENT_ORIGIN;
+        }
+      }
       break;
     case PARENT_SPECIFIED:
+    case PARENT_ORIGIN:
       s->parent_params->nextParent(&s->request_data, &s->parent_result);
 
       // Hack!
@@ -310,6 +317,7 @@ find_server_and_update_current_info(HttpTransact::State* s)
   }
 
   switch (s->parent_result.r) {
+  case PARENT_ORIGIN:
   case PARENT_SPECIFIED:
     s->parent_info.name = s->arena.str_store(s->parent_result.hostname, strlen(s->parent_result.hostname));
     s->parent_info.port = s->parent_result.port;
@@ -456,7 +464,7 @@ how_to_open_connection(HttpTransact::State* s)
     break;
   }
 
-  if (s->method == HTTP_WKSIDX_CONNECT && s->parent_result.r != PARENT_SPECIFIED) {
+  if (s->method == HTTP_WKSIDX_CONNECT && (s->parent_result.r != PARENT_SPECIFIED || s->parent_result.r != PARENT_ORIGIN)) {
     s->cdn_saved_next_action = HttpTransact::SM_ACTION_ORIGIN_SERVER_RAW_OPEN;
   } else {
     s->cdn_saved_next_action = HttpTransact::SM_ACTION_ORIGIN_SERVER_OPEN;
@@ -1336,7 +1344,7 @@ HttpTransact::HandleRequest(State* s)
       //  DNS service available, we just want to forward the request
       //  the parent proxy.  In this case, we never find out the
       //  origin server's ip.  So just skip past OSDNS
-      ats_ip_invalidate(&s->server_info.addr);
+      //ats_ip_invalidate(&s->server_info.addr);
       StartAccessControl(s);
       return;
     } else if (s->http_config_param->no_origin_server_dns) {
@@ -2363,6 +2371,11 @@ HttpTransact::HandleCacheOpenReadHitFreshness(State* s)
     // is the document still fresh enough to be served back to
     // the client without revalidation?
     Freshness_t freshness = what_is_document_freshness(s, &s->hdr_info.client_request, obj->response_get());
+    if(s->hack_force_fresh) {
+      freshness = FRESHNESS_FRESH;
+      DebugTxn("http_trans", "[HandleCacheOpenReadHitFreshness] forcing freshness = FRESHNESS_FRESH");
+    }
+
     switch (freshness) {
     case FRESHNESS_FRESH:
       DebugTxn("http_seq", "[HttpTransact::HandleCacheOpenReadHitFreshness] " "Fresh copy");
@@ -3474,10 +3487,40 @@ HttpTransact::handle_response_from_parent(State* s)
         return;
       }
 
-      if (s->current.attempts < s->http_config_param->parent_connect_attempts) {
+      // try a simple retry if we received a simple retryable response from the parent.
+      if (s->current.retry_type == SIMPLE_RETRY || s->current.retry_type == DEAD_SERVER_RETRY) {
+        if (s->current.retry_type == SIMPLE_RETRY) {
+          if (s->current.simple_retry_attempts >= s->parent_result.rec->num_parents) {
+            DebugTxn("http_trans", "SIMPLE_RETRY: retried all parents, send error to client.\n");
+            next_lookup = HOST_NONE;
+          }
+          else {
+            s->current.simple_retry_attempts++;
+            DebugTxn("http_trans", "SIMPLE_RETRY: try another parent.\n");
+            next_lookup = find_server_and_update_current_info (s);
+          }
+        }
+        else { // DEAD_SERVER_RETRY
+          if (s->current.dead_server_retry_attempts >= s->parent_result.rec->num_parents) {
+            DebugTxn("http_trans", "DEAD_SERVER_RETRY: retried all parents, send error to client.\n");
+            next_lookup = HOST_NONE;
+          }
+          else {
+            s->current.dead_server_retry_attempts++;
+            DebugTxn("http_trans", "DEAD_SERVER_RETRY: marking parent down and trying another.\n");
+            s->parent_params->markParentDown(&s->parent_result);
+            next_lookup = find_server_and_update_current_info(s);
+          }
+        }
+      }
+      // parent_connect_attempts is set from proxy.config.http.parent_proxy.total_connect_attempts in
+      // records.config.
+      else if (s->current.attempts < s->http_config_param->parent_connect_attempts) {
         s->current.attempts++;
 
         // Are we done with this particular parent?
+        // per_parent_connect_attempts should be less than proxy.config.http.parent_proxy.total_connect_attempts
+        // so that a new parent is tried.
         if ((s->current.attempts - 1) % s->http_config_param->per_parent_connect_attempts != 0) {
           // No we are not done with this parent so retry
           s->next_action = how_to_open_connection(s);
@@ -3496,40 +3539,39 @@ HttpTransact::handle_response_from_parent(State* s)
           }
           // We are done so look for another parent if any
           next_lookup = find_server_and_update_current_info(s);
-        }
+         }
       } else {
         // Done trying parents... fail over to origin server if that is
         //   appropriate
         DebugTxn("http_trans", "[handle_response_from_parent] Error. No more retries.");
         s->parent_params->markParentDown(&s->parent_result);
         s->parent_result.r = PARENT_FAIL;
-        next_lookup = find_server_and_update_current_info(s);
-      }
+         next_lookup = find_server_and_update_current_info(s);
+       }
 
-      // We have either tried to find a new parent or failed over to the
-      //   origin server
-      switch (next_lookup) {
-      case PARENT_PROXY:
-        ink_assert(s->current.request_to == PARENT_PROXY);
-        TRANSACT_RETURN(SM_ACTION_DNS_LOOKUP, PPDNSLookup);
-        break;
-      case ORIGIN_SERVER:
-        s->current.attempts = 0;
-        s->next_action = how_to_open_connection(s);
-        if (s->current.server == &s->server_info && s->next_hop_scheme == URL_WKSIDX_HTTP) {
-          HttpTransactHeaders::remove_host_name_from_url(&s->hdr_info.server_request);
-        }
-        break;
-      case HOST_NONE:
-        handle_parent_died(s);
-        break;
-      default:
-        // This handles:
-        // UNDEFINED_LOOKUP, ICP_SUGGESTED_HOST,
-        // INCOMING_ROUTER
-        break;
-      }
-
+       // We have either tried to find a new parent or failed over to the
+       //   origin server
+       switch (next_lookup) {
+       case PARENT_PROXY:
+         ink_assert(s->current.request_to == PARENT_PROXY);
+         TRANSACT_RETURN(SM_ACTION_DNS_LOOKUP, PPDNSLookup);
+         break;
+       case ORIGIN_SERVER:
+         s->current.attempts = 0;
+         s->next_action = how_to_open_connection(s);
+         if (s->current.server == &s->server_info && s->next_hop_scheme == URL_WKSIDX_HTTP) {
+           HttpTransactHeaders::remove_host_name_from_url(&s->hdr_info.server_request);
+         }
+         break;
+       case HOST_NONE:
+         handle_parent_died(s);
+         break;
+       default:
+         // This handles:
+         // UNDEFINED_LOOKUP, ICP_SUGGESTED_HOST,
+         // INCOMING_ROUTER
+         break;
+       }
       break;
     }
   }
@@ -6326,6 +6368,8 @@ HttpTransact::is_request_retryable(State* s)
 bool
 HttpTransact::is_response_valid(State* s, HTTPHdr* incoming_response)
 {
+  int server_response = 0;
+
   if (s->current.state != CONNECTION_ALIVE) {
     ink_assert((s->current.state == CONNECTION_ERROR) ||
                       (s->current.state == OPEN_RAW_ERROR) ||
@@ -6339,6 +6383,43 @@ HttpTransact::is_response_valid(State* s, HTTPHdr* incoming_response)
     s->hdr_info.response_error = CONNECTION_OPEN_FAILED;
     return false;
   }
+
+  // is this response is from a load balanced parent.
+  if (s->current.request_to == PARENT_PROXY && s->parent_result.r == PARENT_ORIGIN)
+  {
+    server_response = http_hdr_status_get (s->hdr_info.server_response.m_http);
+    DebugTxn("http_trans", "[is_response_valid] server_response = %d\n", server_response);
+    // is a simple retry required.
+    if (s->txn_conf->simple_retry_enabled && s->http_config_param->simple_retry_response_codes->contains (server_response))
+    {
+      // initiate a retry if we have not already tried all parents, otherwise the response is sent to the client as is.
+      // see SIMPLE_RETRY in handle_response_from_parent().
+      if (s->current.simple_retry_attempts < s->parent_result.rec->num_parents)
+      {
+        s->current.state = BAD_INCOMING_RESPONSE;
+        s->current.retry_type = SIMPLE_RETRY;
+      }
+      else {
+        DebugTxn("http_trans", "SIMPLE_RETRY: retried all parents, send error to client.\n");
+      }
+    }
+    // is a dead server retry required.
+    else if (s->txn_conf->dead_server_retry_enabled && s->http_config_param->dead_server_retry_response_codes->contains (server_response))
+    {
+      // initiate a dead server retry if we have not already tried all parents, otherwise the response is sent to the client as is.
+      // see DEAD_SERVER_RETRY in handle_response_from_parent().
+      if (s->current.dead_server_retry_attempts < s->parent_result.rec->num_parents)
+      {
+        s->current.state = BAD_INCOMING_RESPONSE;
+        s->current.retry_type = DEAD_SERVER_RETRY;
+      }
+      else {
+        DebugTxn("http_trans", "DEAD_SERVER_RETRY: retried all parents, send error to client.\n");
+      }
+    }
+  }
+
+
 
   s->hdr_info.response_error = check_response_validity(s, incoming_response);
 
@@ -7685,6 +7766,15 @@ HttpTransact::build_request(State* s, HTTPHdr* base_request, HTTPHdr* outgoing_r
     // No worry about HTTP/0.9 because we reject forward proxy requests that
     // don't have a host anywhere.
     outgoing_request->set_url_target_from_host_field();
+  }
+
+  // In this case, the parent is actually the origin.  We utilized parent selection
+  // to pick a load balanced origin server using round robin, or consistent hash.
+  else if (s->current.request_to == PARENT_PROXY && ! s->parent_result.rec->isParentProxy() &&
+      outgoing_request->is_target_in_url())
+  {
+    DebugTxn("http_trans", "[build_request] removing target from URL for parent origin");
+    HttpTransactHeaders::remove_host_name_from_url(outgoing_request);
   }
 
   // If the response is most likely not cacheable, eg, request with Authorization,

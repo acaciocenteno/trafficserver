@@ -581,7 +581,7 @@ HttpSM::attach_client_session(HttpClientSession * client_vc, IOBufferReader * bu
   // set up timeouts     //
   /////////////////////////
   client_vc->get_netvc()->set_inactivity_timeout(HRTIME_SECONDS(HttpConfig::m_master.accept_no_activity_timeout));
-  client_vc->get_netvc()->set_active_timeout(HRTIME_SECONDS(HttpConfig::m_master.transaction_active_timeout_in));
+  //client_vc->get_netvc()->set_active_timeout(HRTIME_SECONDS(HttpConfig::m_master.transaction_active_timeout_in));
 
   ++reentrancy_count;
   // Add our state sm to the sm list
@@ -602,6 +602,12 @@ void
 HttpSM::setup_client_read_request_header()
 {
   ink_assert(ua_entry->vc_handler == &HttpSM::state_read_client_request_header);
+
+  /////////////////////////
+  // set up timeouts     //
+  /////////////////////////
+  ua_session->get_netvc()->set_active_timeout(HRTIME_SECONDS(t_state.txn_conf->transaction_active_timeout_in));
+
 
   ua_entry->read_vio = ua_session->do_io_read(this, INT64_MAX, ua_buffer_reader->mbuf);
   // The header may already be in the buffer if this
@@ -2423,10 +2429,16 @@ HttpSM::state_cache_open_write(int event, void *data)
   case CACHE_EVENT_OPEN_WRITE_FAILED:
     // Failed on the write lock and retrying the vector
     //  for reading
-    t_state.cache_info.write_lock_state = HttpTransact::CACHE_WL_FAIL;
-    break;
+    DebugSM("http", "[%" PRId64 "] cache_open_read - " "\n\n fall thru to CACHE_EVENT_OPEN_READ\n\n", sm_id);
+    t_state.hack_force_fresh = true;
+    if(!t_state.cache_info.object_read) {
+      t_state.cache_info.write_lock_state = HttpTransact::CACHE_WL_FAIL;
+      DebugSM("http", "[%" PRId64 "] cache_open_read - " "\n\n NO fall thru - nothing read\n\n", sm_id);
+      break;
+    }
 
   case CACHE_EVENT_OPEN_READ:
+    DebugSM("http", "[%" PRId64 "] cache_open_read - " "CACHE_EVENT_OPEN_READ", sm_id);
     // The write vector was locked and the cache_sm retried
     // and got the read vector again.
     cache_sm.cache_read_vc->get_http_info(&t_state.cache_info.object_read);

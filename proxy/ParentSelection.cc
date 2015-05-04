@@ -203,7 +203,7 @@ ParentConfigParams::parentExists(HttpRequestData * rdata)
 
   findParent(rdata, &junk);
 
-  if (junk.r == PARENT_SPECIFIED) {
+  if (junk.r == PARENT_SPECIFIED || junk.r == PARENT_ORIGIN) {
     return true;
   } else {
     return false;
@@ -279,6 +279,9 @@ ParentConfigParams::findParent(HttpRequestData * rdata, ParentResult * result)
     case PARENT_UNDEFINED:
       Debug("cdn", "PARENT_UNDEFINED");
       break;
+    case PARENT_ORIGIN:
+      Debug("cdn", "PARENT_ORIGIN");
+      break;     
     case PARENT_FAIL:
       Debug("cdn", "PARENT_FAIL");
       break;
@@ -302,6 +305,7 @@ ParentConfigParams::findParent(HttpRequestData * rdata, ParentResult * result)
     case PARENT_DIRECT:
       Debug("parent_select", "Result for %s was %s", host, ParentResultStr[result->r]);
       break;
+    case PARENT_ORIGIN:
     case PARENT_SPECIFIED:
       Debug("parent_select", "sizeof ParentResult = %zu", sizeof(ParentResult));
       Debug("parent_select", "Result for %s was parent %s:%d", host, result->hostname, result->port);
@@ -323,8 +327,8 @@ ParentConfigParams::recordRetrySuccess(ParentResult * result)
   //  Make sure that we are being called back with with a
   //   result structure with a parent that is being retried
   ink_release_assert(result->retry == true);
-  ink_assert(result->r == PARENT_SPECIFIED);
-  if (result->r != PARENT_SPECIFIED) {
+  ink_assert(result->r == PARENT_SPECIFIED || result->r == PARENT_ORIGIN);
+  if (result->r != PARENT_SPECIFIED || result->r != PARENT_ORIGIN) {
     return;
   }
   // If we were set through the API we currently have not failover
@@ -356,8 +360,8 @@ ParentConfigParams::markParentDown(ParentResult * result)
 
   //  Make sure that we are being called back with with a
   //   result structure with a parent
-  ink_assert(result->r == PARENT_SPECIFIED);
-  if (result->r != PARENT_SPECIFIED) {
+  ink_assert(result->r == PARENT_SPECIFIED || result->r == PARENT_ORIGIN);
+  if (result->r != PARENT_SPECIFIED && result->r != PARENT_ORIGIN) {
     return;
   }
   // If we were set through the API we currently have not failover
@@ -403,6 +407,7 @@ ParentConfigParams::markParentDown(ParentResult * result)
   if (new_fail_count > 0 && new_fail_count == FailThreshold) {
     Note("http parent proxy %s:%d marked down", pRec->hostname, pRec->port);
     pRec->available = false;
+    Debug("parent_select", "Parent marked unavailable, pRec->available=%d", pRec->available);
   }
 }
 
@@ -413,8 +418,8 @@ ParentConfigParams::nextParent(HttpRequestData * rdata, ParentResult * result)
 
   //  Make sure that we are being called back with a
   //   result structure with a parent
-  ink_assert(result->r == PARENT_SPECIFIED);
-  if (result->r != PARENT_SPECIFIED) {
+  ink_assert(result->r == PARENT_SPECIFIED || result->r == PARENT_ORIGIN);
+  if (result->r != PARENT_SPECIFIED && result->r != PARENT_ORIGIN) {
     result->r = PARENT_FAIL;
     return;
   }
@@ -446,6 +451,9 @@ ParentConfigParams::nextParent(HttpRequestData * rdata, ParentResult * result)
   case PARENT_DIRECT:
     Debug("cdn", "PARENT_DIRECT");
     break;
+  case PARENT_ORIGIN:
+    Debug("cdn", "PARENT_ORIGIN");
+    break;
   case PARENT_SPECIFIED:
     Debug("cdn", "PARENT_SPECIFIED");
     break;
@@ -464,6 +472,7 @@ ParentConfigParams::nextParent(HttpRequestData * rdata, ParentResult * result)
     case PARENT_DIRECT:
       Debug("parent_select", "Retry result for %s was %s", host, ParentResultStr[result->r]);
       break;
+    case PARENT_ORIGIN:
     case PARENT_SPECIFIED:
       Debug("parent_select", "Retry result for %s was parent %s:%d", host, result->hostname, result->port);
       break;
@@ -479,6 +488,34 @@ ParentConfigParams::nextParent(HttpRequestData * rdata, ParentResult * result)
 //   End API functions
 //
 
+uint64_t
+ParentRecord::getPathHash(HttpRequestData *hrdata, ATSHash64 *h)
+{
+  const char *tmp = NULL;
+  int len;
+  URL *url = hrdata->hdr->url_get();
+
+  // Always hash on '/' because paths returned by ATS are always stripped of it
+  h->update("/", 1);
+
+  tmp = url->path_get(&len);
+  if (tmp) {
+    h->update(tmp, len);
+  }
+
+  if (!ignore_query) {
+    tmp = url->query_get(&len);
+    if (tmp) {
+      h->update("?", 1);
+      h->update(tmp, len);
+    }
+  }
+
+  h->final();
+
+  return h->get();
+}
+
 void
 ParentRecord::FindParent(bool first_call, ParentResult * result, RequestData * rdata, ParentConfigParams * config)
 {
@@ -487,29 +524,27 @@ ParentRecord::FindParent(bool first_call, ParentResult * result, RequestData * r
   bool parentUp = false;
   bool parentRetry = false;
   bool bypass_ok = (go_direct == true && config->DNS_ParentOnly == 0);
-  char *url, *path = NULL;
+  uint64_t path_hash;  
   ATSHash64Sip24 hash;
   pRecord *prtmp = NULL;
 
-  HttpRequestData *request_info = (HttpRequestData *) rdata;
+  HttpRequestData *request_info = static_cast<HttpRequestData *>(rdata);
 
   ink_assert(num_parents > 0 || go_direct == true);
 
   if (first_call == true) {
     if (parents == NULL) {
       // We should only get into this state if
-      //   if we are supposed to go dirrect
+      //   if we are supposed to go direct
       ink_assert(go_direct == true);
       goto NO_PARENTS;
-    } else if (round_robin == true) {
-      cur_index = ink_atomic_increment((int32_t *) & rr_next, 1);
-      cur_index = result->start_parent = cur_index % num_parents;
     } else {
       switch (round_robin) {
-      case P_STRICT_ROUND_ROBIN:
+/*      case P_STRICT_ROUND_ROBIN:
         cur_index = ink_atomic_increment((int32_t *) & rr_next, 1);
         cur_index = cur_index % num_parents;
         break;
+*/
       case P_HASH_ROUND_ROBIN:
         // INKqa12817 - make sure to convert to host byte order
         // Why was it important to do host order here?  And does this have any
@@ -523,24 +558,26 @@ ParentRecord::FindParent(bool first_call, ParentResult * result, RequestData * r
         }
         break;
       case P_CONSISTENT_HASH:
-        url = rdata->get_string();
-        path = strstr(url + 7, "/");
-        if (path) {
-          prtmp = (pRecord *) chash->lookup(path, &(result->chashIter), NULL, (ATSHash64 *) &hash);
+        // url = rdata->get_string();
+        // path = strstr(url + 7, "/");
+        path_hash = getPathHash(request_info, (ATSHash64 *) &hash);        
+        if (path_hash) {
+          prtmp = (pRecord *) chash->lookup_by_hashval(path_hash, &result->chashIter, &result->wrap_around);
           if (prtmp) {
             cur_index = prtmp->idx;
             result->foundParents[cur_index] = true;
             result->start_parent++;
+            break;
           } else {
-            Error("Consistent Hash loopup returned NULL");
-            cur_index = ink_atomic_increment((int32_t *) & rr_next, 1);
-            cur_index = cur_index % num_parents;
+            Error("Consistent Hash lookup returned NULL (first lookup)");
           }
         } else {
-          Error("Could not find path in URL: %s",url);
-          cur_index = ink_atomic_increment((int32_t *) & rr_next, 1);
-          cur_index = cur_index % num_parents;
+          Error("Could not find path");
         }
+        // Fall through to round robin
+      case P_STRICT_ROUND_ROBIN:
+        cur_index = ink_atomic_increment((int32_t *) & rr_next, 1);
+        cur_index = cur_index % num_parents;        
         break;
       case P_NO_ROUND_ROBIN:
         cur_index = result->start_parent = 0;
@@ -551,22 +588,28 @@ ParentRecord::FindParent(bool first_call, ParentResult * result, RequestData * r
     }
   } else {
     if (round_robin == P_CONSISTENT_HASH) {
+      Debug("parent_select", "result->start_parent=%d, num_parents=%d", result->start_parent, num_parents);
       if (result->start_parent == (unsigned int) num_parents) {
         result->wrap_around = true;
         result->start_parent = 0;
         memset(result->foundParents, 0, sizeof(result->foundParents));
-        url = rdata->get_string();
-        path = strstr(url + 7, "/");
+        // url = rdata->get_string();
+        // path = strstr(url + 7, "/");
       }
 
       do {
-        prtmp = (pRecord *) chash->lookup(path, &(result->chashIter), NULL, (ATSHash64 *) &hash);
-        path = NULL;
-      } while (result->foundParents[prtmp->idx]);
-
-      cur_index = prtmp->idx;
-      result->foundParents[cur_index] = true;
-      result->start_parent++;
+        prtmp = (pRecord *) chash->lookup(NULL, 0, &result->chashIter, &result->wrap_around, &hash);
+      } while (prtmp && result->foundParents[prtmp->idx]);
+      
+      if (prtmp) {
+        cur_index = prtmp->idx;
+        result->foundParents[cur_index] = true;
+        result->start_parent++;
+      } else {
+        Error("Consistent Hash lookup returned NULL (subsequent lookup)");
+        cur_index = ink_atomic_increment((int32_t *) & rr_next, 1);
+        cur_index = cur_index % num_parents;
+      }
     } else {
       // Move to next parent due to failure
       cur_index = (result->last_parent + 1) % num_parents;
@@ -610,7 +653,12 @@ ParentRecord::FindParent(bool first_call, ParentResult * result, RequestData * r
     }
 
     if (parentUp == true) {
-      result->r = PARENT_SPECIFIED;
+      if (! this->parent_is_proxy) {
+        result->r = PARENT_ORIGIN;
+      }
+      else {
+        result->r = PARENT_SPECIFIED;
+      }
       result->hostname = parents[cur_index].hostname;
       result->port = parents[cur_index].port;
       result->last_parent = cur_index;
@@ -626,18 +674,19 @@ ParentRecord::FindParent(bool first_call, ParentResult * result, RequestData * r
         result->wrap_around = false;
         result->start_parent = 0;
         memset(result->foundParents, 0, sizeof(result->foundParents));
-        url = rdata->get_string();
-        path = strstr(url + 7, "/");
+        // url = rdata->get_string();
+        // path = strstr(url + 7, "/");
       }
 
       do {
-        prtmp = (pRecord *) chash->lookup(path, &(result->chashIter), NULL, (ATSHash64 *) &hash);
-        path = NULL;
-      } while (result->foundParents[prtmp->idx]);
+        prtmp = (pRecord *) chash->lookup(NULL, 0, &(result->chashIter), &result->wrap_around);
+      } while (prtmp && result->foundParents[prtmp->idx]);
 
-      cur_index = prtmp->idx;
-      result->foundParents[cur_index] = true;
-      result->start_parent++;
+      if (prtmp) {
+        cur_index = prtmp->idx;
+        result->foundParents[cur_index] = true;
+        result->start_parent++;
+      }
     } else {
       cur_index = (cur_index + 1) % num_parents;
     }
@@ -787,7 +836,9 @@ ParentRecord::DefaultInit(char *val)
 
   this->go_direct = true;
   this->round_robin = P_NO_ROUND_ROBIN;
+  this->ignore_query = false;
   this->scheme = NULL;
+  this->parent_is_proxy = true;
   errPtr = ProcessParents(val);
 
   if (errPtr != NULL) {
@@ -881,9 +932,21 @@ ParentRecord::Init(matcher_line * line_info)
         go_direct = true;
       }
       used = true;
+    } else if (strcasecmp(label, "qstring") == 0) {
+        // qstring=ignore | consider
+        if (strcasecmp(val, "ignore") == 0) {
+            this->ignore_query = true;
+        }
+    } else if (strcasecmp (label, "parent_is_proxy") == 0) {
+     if (strcasecmp(val, "false") == 0) {
+       parent_is_proxy = false;
+     } else {
+       parent_is_proxy = true;
+     }
+      used = true;      
     }
     // Report errors generated by ProcessParents();
-    if (errPtr != NULL) {
+    if (errPtr != NULL) {      
       errBuf = (char *)ats_malloc(errBufLen * sizeof(char));
       snprintf(errBuf, errBufLen, "%s %s at line %d", modulePrefix, errPtr, line_num);
       return errBuf;
@@ -956,6 +1019,7 @@ ParentRecord::Print()
     printf(" %s:%d ", parents[i].hostname, parents[i].port);
   }
   printf(" rr=%s direct=%s\n", ParentRRStr[round_robin], (go_direct == true) ? "true" : "false");
+  printf(" parent_is_proxy=%s\n", ((parent_is_proxy == true) ? "true" : "false"));  
 }
 
 // ParentRecord* createDefaultParent(char* val)
@@ -1370,12 +1434,17 @@ show_result(ParentResult * p)
   switch (p->r) {
   case PARENT_UNDEFINED:
     printf("result is PARENT_UNDEFINED\n");
-    break;
+    break;    
   case PARENT_DIRECT:
     printf("result is PARENT_DIRECT\n");
     break;
   case PARENT_SPECIFIED:
     printf("result is PARENT_SPECIFIED\n");
+    printf("hostname is %s\n", p->hostname);
+    printf("port is %d\n", p->port);
+    break;
+  case PARENT_ORIGIN:
+    printf("result is PARENT_ORIGIN\n");
     printf("hostname is %s\n", p->hostname);
     printf("port is %d\n", p->port);
     break;
