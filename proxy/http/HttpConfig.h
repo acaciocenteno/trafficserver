@@ -331,6 +331,17 @@ struct HttpConfigPortRange {
   }
 };
 
+//////////////////////////////////////////////////////////////
+// Container for simple retry and dead server retry http
+// response codes.
+/////////////////////////////////////////////////////////////
+class ResponseCodesMap : public std::map<int,int>
+{
+  public:
+    ResponseCodesMap (MgmtString);
+    bool contains (int);
+};
+
 /////////////////////////////////////////////////////////////
 // This is a little helper class, used by the HttpConfigParams
 // and State (txn) structure. It allows for certain configs
@@ -361,6 +372,7 @@ struct OverridableHttpConfigParams {
       freshness_fuzz_min_time(0), max_cache_open_read_retries(-1), cache_open_read_retry_time(10),
       background_fill_active_timeout(60), http_chunking_size(4096), flow_high_water_mark(0), flow_low_water_mark(0),
       default_buffer_size_index(8), default_buffer_water_mark(32768),
+      simple_retry_enabled(0), simple_retry_attempts_max_retries(2), dead_server_retry_enabled(0),
 
       // Strings / floats must come last
       proxy_response_server_string(NULL), proxy_response_server_string_len(0), global_user_agent_header(NULL),
@@ -502,6 +514,7 @@ struct OverridableHttpConfigParams {
   MgmtInt keep_alive_no_activity_timeout_out;
   MgmtInt transaction_no_activity_timeout_in;
   MgmtInt transaction_no_activity_timeout_out;
+  MgmtInt transaction_active_timeout_in;
   MgmtInt transaction_active_timeout_out;
   MgmtInt origin_max_connections;
 
@@ -532,6 +545,13 @@ struct OverridableHttpConfigParams {
 
   MgmtInt default_buffer_size_index;
   MgmtInt default_buffer_water_mark;
+
+  ///////////////////////////////////////////////////
+  // parent origin server load balancing variables //
+  ///////////////////////////////////////////////////
+  MgmtInt simple_retry_enabled;
+  MgmtInt simple_retry_attempts_max_retries;
+  MgmtInt dead_server_retry_enabled;
 
   // IMPORTANT: Here comes all strings / floats configs.
 
@@ -615,7 +635,6 @@ public:
   // connection variables. timeouts are in seconds //
   ///////////////////////////////////////////////////
   MgmtByte session_auth_cache_keep_alive_enabled;
-  MgmtInt transaction_active_timeout_in;
   MgmtInt accept_no_activity_timeout;
 
   ////////////////////////////////////
@@ -656,6 +675,14 @@ public:
   ////////////////////////////////////////////
   char *connect_ports_string;
   HttpConfigPortRange *connect_ports;
+
+  /////////////////////////////////////////////////////////
+  // simple retry and dead server retry response codes. //
+  ///////////////////////////////////////////////////////
+  char *simple_retry_response_codes_string;
+  ResponseCodesMap *simple_retry_response_codes;
+  char *dead_server_retry_response_codes_string;
+  ResponseCodesMap *dead_server_retry_response_codes;
 
   //////////
   // Push //
@@ -821,7 +848,7 @@ inline HttpConfigParams::HttpConfigParams()
     uncacheable_requests_bypass_parent(1), no_origin_server_dns(0), use_client_target_addr(0), use_client_source_port(0),
     proxy_request_via_string(NULL), proxy_request_via_string_len(0), proxy_response_via_string(NULL),
     proxy_response_via_string_len(0), url_expansions_string(NULL), url_expansions(NULL), num_url_expansions(0),
-    session_auth_cache_keep_alive_enabled(1), transaction_active_timeout_in(900), accept_no_activity_timeout(120),
+    session_auth_cache_keep_alive_enabled(1), accept_no_activity_timeout(120),
     parent_connect_attempts(4), per_parent_connect_attempts(2), parent_connect_timeout(30), anonymize_other_header_list(NULL),
     enable_http_stats(1), icp_enabled(0), stale_icp_enabled(0), cache_vary_default_text(NULL), cache_vary_default_images(NULL),
     cache_vary_default_other(NULL), max_cache_open_write_retries(1), cache_enable_default_vary_headers(0), cache_post_method(0),
@@ -847,11 +874,21 @@ inline HttpConfigParams::~HttpConfigParams()
   ats_free(cache_vary_default_images);
   ats_free(cache_vary_default_other);
   ats_free(connect_ports_string);
+  ats_free(simple_retry_response_codes_string);
+  ats_free(dead_server_retry_response_codes_string);
   ats_free(reverse_proxy_no_host_redirect);
   ats_free(url_expansions);
 
   if (connect_ports) {
     delete connect_ports;
+  }
+
+  if (simple_retry_response_codes) {
+    delete simple_retry_response_codes;
+  }
+
+  if (dead_server_retry_response_codes) {
+    delete dead_server_retry_response_codes;
   }
 }
 #endif /* #ifndef _HttpConfig_h_ */

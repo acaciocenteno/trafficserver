@@ -957,7 +957,7 @@ HttpConfig::startup()
                                     "proxy.config.http.transaction_no_activity_timeout_in");
   HttpEstablishStaticConfigLongLong(c.oride.transaction_no_activity_timeout_out,
                                     "proxy.config.http.transaction_no_activity_timeout_out");
-  HttpEstablishStaticConfigLongLong(c.transaction_active_timeout_in, "proxy.config.http.transaction_active_timeout_in");
+  //HttpEstablishStaticConfigLongLong(c.transaction_active_timeout_in, "proxy.config.http.transaction_active_timeout_in");
   HttpEstablishStaticConfigLongLong(c.oride.transaction_active_timeout_out, "proxy.config.http.transaction_active_timeout_out");
   HttpEstablishStaticConfigLongLong(c.accept_no_activity_timeout, "proxy.config.http.accept_no_activity_timeout");
 
@@ -1063,6 +1063,8 @@ HttpConfig::startup()
   HttpEstablishStaticConfigByte(c.oride.cache_range_write, "proxy.config.http.cache.range.write");
 
   HttpEstablishStaticConfigStringAlloc(c.connect_ports_string, "proxy.config.http.connect_ports");
+  HttpEstablishStaticConfigStringAlloc(c.simple_retry_response_codes_string, "proxy.config.http.parent_origin.simple_retry_response_codes");
+  HttpEstablishStaticConfigStringAlloc(c.dead_server_retry_response_codes_string, "proxy.config.http.parent_origin.dead_server_retry_response_codes");
 
   HttpEstablishStaticConfigLongLong(c.oride.request_hdr_max_size, "proxy.config.http.request_header_max_size");
   HttpEstablishStaticConfigLongLong(c.oride.response_hdr_max_size, "proxy.config.http.response_header_max_size");
@@ -1121,6 +1123,11 @@ HttpConfig::startup()
   // Local Manager
   HttpEstablishStaticConfigLongLong(c.autoconf_port, "proxy.config.admin.autoconf_port");
   HttpEstablishStaticConfigByte(c.autoconf_localhost_only, "proxy.config.admin.autoconf.localhost_only");
+
+  // parent origin.
+  HttpEstablishStaticConfigLongLong(c.oride.simple_retry_enabled, "proxy.config.http.parent_origin.simple_retry_enabled");
+  HttpEstablishStaticConfigLongLong(c.oride.simple_retry_attempts_max_retries, "proxy.config.http.parent_origin.simple_retry_attempts_max_retries");
+  HttpEstablishStaticConfigLongLong(c.oride.dead_server_retry_enabled, "proxy.config.http.parent_origin.dead_server_retry_enabled");
 
   // Cluster time delta gets it own callback since it needs
   //  to use ink_atomic_swap
@@ -1222,7 +1229,7 @@ HttpConfig::reconfigure()
   params->oride.keep_alive_no_activity_timeout_out = m_master.oride.keep_alive_no_activity_timeout_out;
   params->oride.transaction_no_activity_timeout_in = m_master.oride.transaction_no_activity_timeout_in;
   params->oride.transaction_no_activity_timeout_out = m_master.oride.transaction_no_activity_timeout_out;
-  params->transaction_active_timeout_in = m_master.transaction_active_timeout_in;
+  //params->oride.transaction_active_timeout_in = m_master.transaction_active_timeout_in;
   params->oride.transaction_active_timeout_out = m_master.oride.transaction_active_timeout_out;
   params->accept_no_activity_timeout = m_master.accept_no_activity_timeout;
   params->oride.background_fill_active_timeout = m_master.oride.background_fill_active_timeout;
@@ -1324,6 +1331,10 @@ HttpConfig::reconfigure()
 
   params->connect_ports_string = ats_strdup(m_master.connect_ports_string);
   params->connect_ports = parse_ports_list(params->connect_ports_string);
+  params->simple_retry_response_codes_string = ats_strdup(m_master.simple_retry_response_codes_string);
+  params->simple_retry_response_codes = new ResponseCodesMap (params->simple_retry_response_codes_string);
+  params->dead_server_retry_response_codes_string = ats_strdup(m_master.dead_server_retry_response_codes_string);
+  params->dead_server_retry_response_codes = new ResponseCodesMap (params->dead_server_retry_response_codes_string);
 
   params->oride.request_hdr_max_size = m_master.oride.request_hdr_max_size;
   params->oride.response_hdr_max_size = m_master.oride.response_hdr_max_size;
@@ -1376,6 +1387,9 @@ HttpConfig::reconfigure()
   // Local Manager
   params->autoconf_port = m_master.autoconf_port;
   params->autoconf_localhost_only = m_master.autoconf_localhost_only;
+  params->oride.simple_retry_enabled = m_master.oride.simple_retry_enabled;
+  params->oride.simple_retry_attempts_max_retries = m_master.oride.simple_retry_attempts_max_retries;
+  params->oride.dead_server_retry_enabled = m_master.oride.dead_server_retry_enabled;
 
   m_id = configProcessor.set(m_id, params);
 
@@ -1485,6 +1499,39 @@ HttpConfig::parse_ports_list(char *ports_string)
   return (ports_list);
 }
 
+///////////////////////////////////////////////////////
+// ResponseCodesMap implementation.
+// ///////////////////////////////////////////////////
+ResponseCodesMap::ResponseCodesMap (MgmtString str)
+{
+  char buf[4096];
+  if (str == NULL) return;
+  char *p = strncpy (buf, str, 4095);
+
+  while (p != NULL)
+  {
+    if (isdigit (*p))
+    {
+      int i = atoi (p);
+      insert (std::pair<int,int> (i,i));
+      if ( (p = strchr (p, ',')) == NULL) break;
+    }
+    p++;
+  }
+}
+
+bool
+ResponseCodesMap::contains (int i)
+{
+  ResponseCodesMap::iterator it;
+
+  if (empty()) return false;
+
+  it = find (i);
+  if (it != end() && it->second == i) return true;
+
+  return false;
+}
 ////////////////////////////////////////////////////////////////
 //
 //  HttpConfig::parse_url_expansions()
